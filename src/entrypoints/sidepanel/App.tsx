@@ -36,9 +36,13 @@ function App() {
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false)
   const [showSummary, setShowSummary] = useState(false)
   const [currentPageTitle, setCurrentPageTitle] = useState("当前页面")
+  const [currentPageUrl, setCurrentPageUrl] = useState("")
+  const [faviconUrl, setFaviconUrl] = useState("")
   const [messages, setMessages] = useState<Array<{role: 'user' | 'assistant' | 'system', content: string}>>([]) 
   const [isLoading, setIsLoading] = useState(false)
   const [isApiKeyMissing, setIsApiKeyMissing] = useState(false)
+  const [isSummarizing, setIsSummarizing] = useState(false)
+  const [summary, setSummary] = useState<string | null>(null)
 
   const models = [
     {
@@ -119,9 +123,85 @@ function App() {
     setIsModelDropdownOpen(false)
   }
 
-  const handleGenerateSummary = () => {
-    setShowSummary(true)
-  }
+  // Function to extract content from the current page and generate a summary
+  const handleGenerateSummary = async () => {
+    if (isSummarizing || isApiKeyMissing) return;
+    
+    setIsSummarizing(true);
+    setShowSummary(true);
+    
+    try {
+      // Get the current active tab
+      const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+      if (!tabs[0]?.id) {
+        throw new Error('No active tab found');
+      }
+      
+      // Execute script to get page content
+      const results = await browser.scripting.executeScript({
+        target: { tabId: tabs[0].id },
+        func: () => {
+          // Extract text content from the page
+          const getVisibleText = () => {
+            // Get all text nodes in the body
+            const walker = document.createTreeWalker(
+              document.body,
+              NodeFilter.SHOW_TEXT,
+              null
+            );
+            
+            let text = '';
+            let node;
+            while (node = walker.nextNode()) {
+              // Skip hidden elements
+              const element = node.parentElement;
+              if (element && 
+                  window.getComputedStyle(element).display !== 'none' && 
+                  window.getComputedStyle(element).visibility !== 'hidden') {
+                text += node.nodeValue + ' ';
+              }
+            }
+            
+            // Clean up text
+            return text
+              .replace(/\s+/g, ' ')
+              .trim()
+              .substring(0, 10000); // Limit to 10000 characters
+          };
+          
+          return getVisibleText();
+        }
+      });
+      
+      // Extract the page content from the results
+      const pageContent = results[0]?.result || '';
+      
+      if (!pageContent) {
+        throw new Error('Could not extract page content');
+      }
+      
+      // Send the content to the background script for summarization
+      const response = await browser.runtime.sendMessage({
+        action: 'summarize',
+        model: selectedModel,
+        pageContent,
+        pageTitle: currentPageTitle
+      }) as ChatResponse;
+      
+      if (response && response.success) {
+        // Extract the summary from the response
+        const summaryText = response.data?.choices?.[0]?.message?.content || '无法生成摘要';
+        setSummary(summaryText);
+      } else {
+        throw new Error(response?.error || '生成摘要时出错');
+      }
+    } catch (error) {
+      console.error('Error generating summary:', error);
+      setSummary(`错误: ${error instanceof Error ? error.message : '生成摘要时出错'}`);
+    } finally {
+      setIsSummarizing(false);
+    }
+  };
 
   const updatePageTitle = (title: string) => {
     setCurrentPageTitle(title)
@@ -137,39 +217,54 @@ function App() {
     checkApiKey()
   }, [selectedModel])
   
-  // Get page title
+  // Function to truncate title to fit on one line
+  const truncateTitle = (title: string): string => {
+    // Limit title to a reasonable length (around 25-30 characters)
+    const maxLength = 30;
+    if (title.length <= maxLength) return title;
+    return title.substring(0, maxLength) + '...';
+  };
+  
+  // Listen for page updates from background script
   useEffect(() => {
-    // In a real implementation, this would extract the title from the current page
-    // For example, from document.title or from a URL parameter
-    const detectPageTitle = () => {
-      // This is a placeholder. In a real app, you would get this from the actual page
-      const url = window.location.href
-      if (url.includes("youtube.com")) {
-        setCurrentPageTitle("YouTube - " + (document.title || "Video Page"))
-      } else if (url.includes("github.com")) {
-        setCurrentPageTitle(document.title.split(" · ")[0] || "GitHub Repository")
-      } else {
-        // Default fallback
-        setCurrentPageTitle(document.title || "当前页面")
+    const handleMessage = (message: any) => {
+      if (message && message.action === 'pageUpdated') {
+        const title = message.title || '当前页面';
+        setCurrentPageTitle(truncateTitle(title));
+        setCurrentPageUrl(message.url || '');
+        setFaviconUrl(message.faviconUrl || '');
+        // Reset summary when page changes
+        setSummary(null);
+        setShowSummary(false);
       }
-    }
+      return true;
+    };
 
-    detectPageTitle()
+    // Add listener for messages from background script
+    browser.runtime.onMessage.addListener(handleMessage);
 
-    // Set up an observer to detect page changes
-    const observer = new MutationObserver(() => {
-      detectPageTitle()
-    })
+    // Get current tab information on initial load
+    const getCurrentTab = async () => {
+      try {
+        // Get the current active tab
+        const tabs = await browser.tabs.query({ active: true, currentWindow: true });
+        if (tabs[0]) {
+          const title = tabs[0].title || '当前页面';
+          setCurrentPageTitle(truncateTitle(title));
+          setCurrentPageUrl(tabs[0].url || '');
+          setFaviconUrl(tabs[0].favIconUrl || '');
+        }
+      } catch (error) {
+        console.error('Error getting current tab:', error);
+      }
+    };
 
-    observer.observe(document.querySelector("title") || document.body, {
-      subtree: true,
-      characterData: true,
-      childList: true,
-    })
+    getCurrentTab();
 
+    // Clean up listener when component unmounts
     return () => {
-      observer.disconnect()
-    }
+      browser.runtime.onMessage.removeListener(handleMessage);
+    };
   }, [])
   
   // Handle sending a message to the AI model
@@ -296,14 +391,77 @@ function App() {
             </div>
           </div>
         )}
+        
+        {/* Page Summary */}
+        {showSummary && (
+          <div className="bg-white border border-gray-200 rounded-lg p-4 mt-4 shadow-sm">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-medium text-gray-700">页面摘要</h3>
+              <button 
+                className="text-gray-400 hover:text-gray-600 transition-colors"
+                onClick={() => setShowSummary(false)}
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            
+            {isSummarizing ? (
+              <div className="flex justify-center py-4">
+                <div className="flex space-x-2">
+                  <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"></div>
+                  <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce delay-75"></div>
+                  <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce delay-150"></div>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm text-gray-600 whitespace-pre-wrap">{summary}</p>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Summary Button */}
       <div className="px-4 pb-2">
         <div className="flex items-center justify-between p-2.5 bg-white rounded-2xl shadow-[0_0_10px_rgba(0,0,0,0.05)] hover:shadow-[0_0_15px_rgba(0,0,0,0.1)] transition-all duration-300">
           <div className="flex items-center gap-2">
-            <div className="flex items-center justify-center w-5 h-5 rounded-lg bg-gray-50">
-              <svg
+            <div className="flex items-center justify-center w-5 h-5 rounded-lg bg-gray-50 overflow-hidden">
+              {faviconUrl ? (
+                <img 
+                  src={faviconUrl} 
+                  alt="Page favicon" 
+                  className="w-4 h-4 object-contain"
+                  onError={(e) => {
+                    // If favicon fails to load, show default icon
+                    const imgElement = e.currentTarget as HTMLImageElement;
+                    imgElement.style.display = 'none';
+                    
+                    // Find the fallback icon and display it
+                    const parent = imgElement.parentElement;
+                    if (parent) {
+                      const fallbackIcon = parent.querySelector('svg[data-fallback="true"]') as HTMLElement;
+                      if (fallbackIcon) {
+                        fallbackIcon.style.display = 'block';
+                      }
+                    }
+                  }}
+                />
+              ) : (
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  className="text-gray-600"
+                >
+                  <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
+                </svg>
+              )}
+              <svg 
+                style={{display: 'none'}}
                 width="12"
                 height="12"
                 viewBox="0 0 24 24"
@@ -311,22 +469,38 @@ function App() {
                 stroke="currentColor"
                 strokeWidth="2"
                 className="text-gray-600"
+                data-fallback="true"
               >
                 <path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" />
               </svg>
             </div>
-            <span className="text-[13px] font-medium text-gray-700">{currentPageTitle}</span>
+            <span className="text-[13px] font-medium text-gray-700 whitespace-nowrap overflow-hidden text-ellipsis block max-w-[180px]">{currentPageTitle}</span>
           </div>
           <div className="flex items-center gap-2">
             <button
-              className="px-2.5 py-1 text-purple-500 hover:text-purple-600 hover:bg-purple-50 rounded-full transition-all duration-300 text-[13px] font-medium group relative overflow-hidden"
+              className={`px-2.5 py-1 ${isSummarizing || isApiKeyMissing ? 'text-gray-300 cursor-not-allowed' : 'text-purple-500 hover:text-purple-600 hover:bg-purple-50 cursor-pointer'} rounded-full transition-all duration-300 text-[13px] font-medium group relative overflow-hidden`}
               onClick={handleGenerateSummary}
+              disabled={isSummarizing || isApiKeyMissing}
             >
               <span className="relative z-10 flex items-center gap-1">
-                <Sparkles className="h-3 w-3" />
-                总结
+                {isSummarizing ? (
+                  <>
+                    <svg className="animate-spin h-3 w-3 text-purple-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    正在总结
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="h-3 w-3" />
+                    总结
+                  </>
+                )}
               </span>
-              <span className="absolute inset-0 bg-gradient-to-r from-purple-100/0 via-purple-200/30 to-purple-100/0 opacity-0 group-hover:opacity-100 group-hover:animate-shimmer"></span>
+              {!isSummarizing && !isApiKeyMissing && (
+                <span className="absolute inset-0 bg-gradient-to-r from-purple-100/0 via-purple-200/30 to-purple-100/0 opacity-0 group-hover:opacity-100 group-hover:animate-shimmer"></span>
+              )}
             </button>
             <button className="p-1 text-gray-400 hover:text-gray-600 transition-colors rounded-full hover:bg-gray-50">
               <Bookmark className="h-3.5 w-3.5" />
