@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import {
   Settings,
   Menu,
@@ -13,12 +13,17 @@ import {
   ChevronRight,
   Eye,
   EyeOff,
+  CheckCircle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { saveApiKey, getApiKeys, ApiKeys } from "@/lib/storage"
 
 export default function App() {
-  const [showApiKey, setShowApiKey] = useState<{ [key: string]: boolean }>({})  
+  const [showApiKey, setShowApiKey] = useState<{ [key: string]: boolean }>({})
+  const [apiKeys, setApiKeys] = useState<ApiKeys>({})
+  const [inputValues, setInputValues] = useState<{ [key: string]: string }>({})
+  const [saveStatus, setSaveStatus] = useState<{ [key: string]: boolean }>({})
 
   const aiProviders = [
     {
@@ -86,11 +91,66 @@ export default function App() {
     },
   ]
 
+  // Load saved API keys on component mount
+  useEffect(() => {
+    const loadApiKeys = async () => {
+      const keys = await getApiKeys()
+      setApiKeys(keys)
+      
+      // Initialize input values with saved keys
+      const initialInputs: { [key: string]: string } = {}
+      Object.entries(keys).forEach(([provider, key]) => {
+        initialInputs[provider] = key
+      })
+      setInputValues(initialInputs)
+    }
+    
+    loadApiKeys()
+  }, [])
+  
   const toggleApiKeyVisibility = (provider: string) => {
     setShowApiKey((prev) => ({
       ...prev,
       [provider]: !prev[provider],
     }))
+  }
+  
+  const handleInputChange = (provider: string, value: string) => {
+    setInputValues((prev) => ({
+      ...prev,
+      [provider]: value,
+    }))
+  }
+  
+  const handleSaveApiKey = async (provider: string) => {
+    try {
+      const apiKey = inputValues[provider]?.trim()
+      if (!apiKey) return
+      
+      await saveApiKey(provider, apiKey)
+      
+      // Update local state
+      setApiKeys((prev) => ({
+        ...prev,
+        [provider]: apiKey,
+      }))
+      
+      // Show success indicator
+      setSaveStatus((prev) => ({
+        ...prev,
+        [provider]: true,
+      }))
+      
+      // Hide success indicator after 2 seconds
+      setTimeout(() => {
+        setSaveStatus((prev) => ({
+          ...prev,
+          [provider]: false,
+        }))
+      }, 2000)
+    } catch (error) {
+      console.error(`Error saving ${provider} API key:`, error)
+    }
   }
 
   const handleGoBack = () => {
@@ -201,6 +261,8 @@ export default function App() {
                           type={showApiKey[provider.name] ? "text" : "password"}
                           placeholder={`输入 ${provider.name} API 密钥`}
                           className="w-64 pr-10"
+                          value={inputValues[provider.name] || ""}
+                          onChange={(e) => handleInputChange(provider.name, e.target.value)}
                         />
                         <button
                           className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
@@ -209,8 +271,20 @@ export default function App() {
                           {showApiKey[provider.name] ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                         </button>
                       </div>
-                      <Button variant="outline" size="sm">
-                        设置
+                      <Button 
+                        variant="outline" 
+                        size="sm"
+                        onClick={() => handleSaveApiKey(provider.name)}
+                        className="relative"
+                      >
+                        {saveStatus[provider.name] ? (
+                          <span className="flex items-center gap-1">
+                            <CheckCircle className="w-3 h-3 text-green-500" />
+                            已保存
+                          </span>
+                        ) : (
+                          "设置"
+                        )}
                       </Button>
                     </div>
                   </div>

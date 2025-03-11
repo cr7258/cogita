@@ -17,15 +17,28 @@ import {
   Heart,
   Mail,
   Bookmark,
+  AlertTriangle,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { browser } from "wxt/browser"
+import { getApiKey } from "@/lib/storage"
+
+// Define response interface
+interface ChatResponse {
+  success: boolean;
+  data?: any;
+  error?: string;
+}
 
 function App() {
   const [inputValue, setInputValue] = useState("")
-  const [selectedModel, setSelectedModel] = useState("OpenAI")
+  const [selectedModel, setSelectedModel] = useState("DeepSeek")
   const [isModelDropdownOpen, setIsModelDropdownOpen] = useState(false)
   const [showSummary, setShowSummary] = useState(false)
   const [currentPageTitle, setCurrentPageTitle] = useState("当前页面")
+  const [messages, setMessages] = useState<Array<{role: 'user' | 'assistant' | 'system', content: string}>>([]) 
+  const [isLoading, setIsLoading] = useState(false)
+  const [isApiKeyMissing, setIsApiKeyMissing] = useState(false)
 
   const models = [
     {
@@ -114,6 +127,17 @@ function App() {
     setCurrentPageTitle(title)
   }
 
+  // Check if API key is available for the selected model
+  useEffect(() => {
+    const checkApiKey = async () => {
+      const apiKey = await getApiKey(selectedModel)
+      setIsApiKeyMissing(!apiKey)
+    }
+    
+    checkApiKey()
+  }, [selectedModel])
+  
+  // Get page title
   useEffect(() => {
     // In a real implementation, this would extract the title from the current page
     // For example, from document.title or from a URL parameter
@@ -147,6 +171,71 @@ function App() {
       observer.disconnect()
     }
   }, [])
+  
+  // Handle sending a message to the AI model
+  const handleSendMessage = async () => {
+    if (!inputValue.trim() || isApiKeyMissing || isLoading) return;
+    
+    // Add user message to chat
+    const userMessage = { role: 'user' as const, content: inputValue.trim() };
+    setMessages(prev => [...prev, userMessage]);
+    setInputValue('');
+    setIsLoading(true);
+    
+    try {
+      // Send message to background script
+      const response = await browser.runtime.sendMessage({
+        action: 'chat',
+        model: selectedModel,
+        messages: [...messages, userMessage],
+      }) as ChatResponse;
+      
+      if (response && response.success) {
+        // Extract the assistant's message from the API response
+        let assistantMessage;
+        
+        if (selectedModel === 'DeepSeek' && response.data?.choices?.[0]?.message?.content) {
+          assistantMessage = {
+            role: 'assistant' as const,
+            content: response.data.choices[0].message.content,
+          };
+        } else {
+          // Default fallback
+          assistantMessage = {
+            role: 'assistant' as const,
+            content: response.data?.content || '抱歉，我无法处理这个请求。',
+          };
+        }
+        
+        setMessages(prev => [...prev, assistantMessage]);
+      } else {
+        // Handle error
+        const errorMessage = {
+          role: 'assistant' as const,
+          content: `错误: ${response?.error || '未知错误'}`,
+        };
+        setMessages(prev => [...prev, errorMessage]);
+      }
+    } catch (error) {
+      console.error('Error sending message:', error);
+      // Add error message to chat
+      const errorMessage = {
+        role: 'assistant' as const,
+        content: `错误: ${error instanceof Error ? error.message : '发送消息时出错'}`,
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  
+  // Handle Enter key press to send message
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
+    }
+  };
 
   // Find the currently selected model
   const currentModel = models.find((model) => model.name === selectedModel) || models[0]
@@ -155,15 +244,58 @@ function App() {
     <div className="flex flex-col h-screen max-w-md mx-auto bg-white rounded-xl overflow-hidden shadow-lg">
       {/* Main Chat Area */}
       <div className="flex-1 overflow-auto px-4 pt-4">
-        {/* Initial Welcome Message */}
-        <div className="flex gap-3 mb-4">
-          <div className="flex-1">
-            <div className="text-gray-800 space-y-2">
-              <p className="text-3xl font-bold">你好,</p>
-              <p className="text-2xl">我今天能帮你什么？</p>
+        {messages.length === 0 ? (
+          /* Initial Welcome Message */
+          <div className="flex gap-3 mb-4">
+            <div className="flex-1">
+              <div className="text-gray-800 space-y-2">
+                <p className="text-3xl font-bold">你好,</p>
+                <p className="text-2xl">我今天能帮你什么？</p>
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          /* Chat Messages */
+          <div className="space-y-4">
+            {messages.map((message, index) => (
+              <div key={index} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div 
+                  className={`max-w-[80%] p-3 rounded-2xl ${
+                    message.role === 'user' 
+                      ? 'bg-purple-100 text-purple-900' 
+                      : 'bg-gray-100 text-gray-800'
+                  }`}
+                >
+                  <p className="whitespace-pre-wrap">{message.content}</p>
+                </div>
+              </div>
+            ))}
+            
+            {/* Loading indicator */}
+            {isLoading && (
+              <div className="flex justify-start">
+                <div className="max-w-[80%] p-3 rounded-2xl bg-gray-100 text-gray-800">
+                  <div className="flex space-x-2">
+                    <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"></div>
+                    <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce delay-75"></div>
+                    <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce delay-150"></div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        
+        {/* API Key Missing Warning */}
+        {isApiKeyMissing && (
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 mt-4 flex items-start gap-2">
+            <AlertTriangle className="h-5 w-5 text-yellow-500 flex-shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm text-yellow-700">未设置 {selectedModel} API 密钥</p>
+              <p className="text-xs text-yellow-600 mt-1">请在设置页面配置 API 密钥以使用此功能。</p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Summary Button */}
@@ -300,7 +432,9 @@ function App() {
             placeholder="输入消息..."
             value={inputValue}
             onChange={(e) => setInputValue(e.target.value)}
+            onKeyDown={handleKeyDown}
             rows={1}
+            disabled={isLoading || isApiKeyMissing}
           />
           <div className="flex items-center justify-between mt-3">
             <div className="flex items-center gap-1.5">
@@ -314,7 +448,11 @@ function App() {
                 <span className="text-sm">@</span>
               </button>
             </div>
-            <button className="text-gray-400 hover:text-gray-600 transition-colors">
+            <button 
+              className={`${isLoading || isApiKeyMissing ? 'text-gray-300 cursor-not-allowed' : 'text-gray-400 hover:text-gray-600 cursor-pointer'} transition-colors`}
+              onClick={handleSendMessage}
+              disabled={isLoading || isApiKeyMissing}
+            >
               <Send className="h-4 w-4" />
             </button>
           </div>
