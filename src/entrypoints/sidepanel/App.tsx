@@ -89,6 +89,17 @@ function App() {
       ),
     },
     {
+      name: "Tongyi",
+      color: "bg-[#FF6A00]",
+      icon: (
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 2L2 7L12 12L22 7L12 2Z" fill="white" />
+          <path d="M2 17L12 22L22 17V7L12 12L2 7V17Z" fill="white" />
+          <circle cx="12" cy="12" r="4" fill="white" />
+        </svg>
+      ),
+    },
+    {
       name: "Gemini",
       color: "bg-[#1e3a8a]",
       icon: (
@@ -192,6 +203,13 @@ function App() {
         // Extract the summary from the response
         const summaryText = response.data?.choices?.[0]?.message?.content || '无法生成摘要';
         setSummary(summaryText);
+        
+        // Add the summary as a message in the chat history
+        const summaryMessage: {role: 'user' | 'assistant' | 'system', content: string} = {
+          role: 'assistant',
+          content: `好的，请看摘要如下：\n\n${summaryText}`
+        };
+        setMessages(prevMessages => [...prevMessages, summaryMessage]);
       } else {
         throw new Error(response?.error || '生成摘要时出错');
       }
@@ -201,6 +219,134 @@ function App() {
     } finally {
       setIsSummarizing(false);
     }
+  };
+
+  // Function to handle clicking on a related question
+  const handleRelatedQuestionClick = (question: string) => {
+    // Keep the summary visible (don't hide it)
+    // setShowSummary(false); -- Removed this line to keep summary visible
+    
+    // Send the question directly to the LLM without showing in input
+    const userMessage: {role: 'user' | 'assistant' | 'system', content: string} = { 
+      role: 'user', 
+      content: question 
+    };
+    
+    // Add the message to the chat history
+    setMessages(prevMessages => [...prevMessages, userMessage]);
+    
+    // Set loading state
+    setIsLoading(true);
+    
+    // Define the response type
+    type ChatResponse = {
+      success: boolean;
+      data?: {
+        choices?: Array<{
+          message?: {role: 'user' | 'assistant' | 'system', content: string}
+        }>
+      };
+      error?: string;
+    };
+    
+    // Send the message to the background script
+    browser.runtime.sendMessage({
+      action: 'chat',
+      model: selectedModel,
+      messages: [...messages, userMessage],
+    }).then((response: unknown) => {
+      // Cast the response to our expected type
+      const typedResponse = response as ChatResponse;
+      if (typedResponse && typedResponse.success) {
+        // Add the assistant's response to the chat
+        const assistantMessage: {role: 'user' | 'assistant' | 'system', content: string} = 
+          typedResponse.data?.choices?.[0]?.message || 
+          { role: 'assistant', content: '无法获取回复' };
+        setMessages(prevMessages => [...prevMessages, assistantMessage]);
+      } else {
+        // Handle error
+        const errorMessage: {role: 'user' | 'assistant' | 'system', content: string} = { 
+          role: 'assistant', 
+          content: `错误: ${typedResponse?.error || '发送消息时出错'}` 
+        };
+        setMessages(prevMessages => [...prevMessages, errorMessage]);
+      }
+      // Reset loading state
+      setIsLoading(false);
+    }).catch(error => {
+      console.error('Error sending message:', error);
+      const errorMessage: {role: 'user' | 'assistant' | 'system', content: string} = { 
+        role: 'assistant', 
+        content: `错误: ${error instanceof Error ? error.message : '发送消息时出错'}` 
+      };
+      setMessages(prevMessages => [...prevMessages, errorMessage]);
+      setIsLoading(false);
+    });
+  };
+
+  // Function to parse and render the structured summary
+  const renderStructuredSummary = (summaryText: string) => {
+    // Split the summary into sections
+    const abstractMatch = summaryText.match(/Abstract \(摘要\)(.*?)(?=Key Points|$)/s);
+    const keyPointsMatch = summaryText.match(/Key Points \(关键点\)(.*?)(?=Related Questions|$)/s);
+    const relatedQuestionsMatch = summaryText.match(/Related Questions \(相关问题\)(.*?)$/s);
+    
+    return (
+      <div className="space-y-6 px-1">
+        {/* Abstract Section */}
+        {abstractMatch && (
+          <div>
+            <h3 className="font-bold text-gray-800 mb-2">Abstract (摘要)</h3>
+            <div className="prose prose-sm max-w-none">
+              {abstractMatch[1].trim().split('\n').map((paragraph, index) => (
+                paragraph.trim() ? <p key={index} className="mb-2">{paragraph.trim()}</p> : null
+              ))}
+            </div>
+          </div>
+        )}
+        
+        {/* Key Points Section */}
+        {keyPointsMatch && (
+          <div>
+            <h3 className="font-bold text-gray-800 mb-2">Key Points (关键点)</h3>
+            <ul className="list-disc pl-5 space-y-1">
+              {keyPointsMatch[1].trim().split('\n')
+                .filter(point => point.trim())
+                .map((point, index) => (
+                  <li key={index} className="mb-1">
+                    {point.trim().replace(/^[-•]\s*/, '')}
+                  </li>
+                ))}
+            </ul>
+          </div>
+        )}
+        
+        {/* Related Questions Section */}
+        {relatedQuestionsMatch && (
+          <div>
+            <h3 className="font-bold text-gray-800 mb-2">Related Questions (相关问题)</h3>
+            <ul className="list-disc pl-5 space-y-2">
+              {relatedQuestionsMatch[1].trim().split('\n')
+                .filter(question => question.trim())
+                .map((question, index) => {
+                  const cleanedQuestion = question.trim().replace(/^[-•]\s*/, '');
+                  if (!cleanedQuestion) return null;
+                  
+                  return (
+                    <li 
+                      key={index} 
+                      className="text-blue-600 hover:text-blue-800 cursor-pointer hover:underline"
+                      onClick={() => handleRelatedQuestionClick(cleanedQuestion)}
+                    >
+                      {cleanedQuestion}
+                    </li>
+                  );
+                })}
+            </ul>
+          </div>
+        )}
+      </div>
+    );
   };
 
   const updatePageTitle = (title: string) => {
@@ -355,13 +501,17 @@ function App() {
             {messages.map((message, index) => (
               <div key={index} className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div 
-                  className={`max-w-[80%] p-3 rounded-2xl ${
+                  className={`max-w-[80%] p-3 ${
                     message.role === 'user' 
-                      ? 'bg-purple-100 text-purple-900' 
-                      : 'bg-gray-100 text-gray-800'
+                      ? 'bg-gray-100 text-gray-800 rounded-2xl' 
+                      : 'text-gray-800'
                   }`}
                 >
-                  <p className="whitespace-pre-wrap">{message.content}</p>
+                  {message.content.includes('Abstract (摘要)') ? (
+                    renderStructuredSummary(message.content.replace('好的，请看摘要如下：\n\n', ''))
+                  ) : (
+                    <p className="whitespace-pre-wrap">{message.content}</p>
+                  )}
                 </div>
               </div>
             ))}
@@ -392,32 +542,16 @@ function App() {
           </div>
         )}
         
-        {/* Page Summary */}
-        {showSummary && (
-          <div className="bg-white border border-gray-200 rounded-lg p-4 mt-4 shadow-sm">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-medium text-gray-700">页面摘要</h3>
-              <button 
-                className="text-gray-400 hover:text-gray-600 transition-colors"
-                onClick={() => setShowSummary(false)}
-              >
-                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            
-            {isSummarizing ? (
-              <div className="flex justify-center py-4">
-                <div className="flex space-x-2">
-                  <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"></div>
-                  <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce delay-75"></div>
-                  <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce delay-150"></div>
-                </div>
+        {/* Summary loading indicator */}
+        {showSummary && isSummarizing && (
+          <div className="flex justify-start">
+            <div className="max-w-[80%] p-3 rounded-2xl bg-gray-100 text-gray-800">
+              <div className="flex space-x-2">
+                <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce"></div>
+                <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce delay-75"></div>
+                <div className="w-2 h-2 rounded-full bg-gray-400 animate-bounce delay-150"></div>
               </div>
-            ) : (
-              <p className="text-sm text-gray-600 whitespace-pre-wrap">{summary}</p>
-            )}
+            </div>
           </div>
         )}
       </div>

@@ -84,6 +84,9 @@ export default defineBackground(() => {
             case "DeepSeek":
               response = await callDeepSeekAPI(apiKey, messages);
               break;
+            case "Tongyi":
+              response = await callTongyiAPI(apiKey, messages);
+              break;
             // Add cases for other models as needed
             default:
               return {
@@ -126,15 +129,35 @@ export default defineBackground(() => {
             };
           }
           
-          // Create a system message instructing the model to summarize
+          // Create a system message instructing the model to summarize with the specified format
           const messages: ChatMessage[] = [
             {
               role: 'system',
-              content: `你是一个专业的内容总结助手。请对以下网页内容进行简洁的总结，提取关键信息，保持客观。页面标题: ${pageTitle}`
+              content: `你是一个专业的内容总结助手。请对以下网页内容进行总结，按照指定格式输出，提取关键信息，保持客观。页面标题: ${pageTitle}`
             },
             {
               role: 'user',
-              content: `请总结以下网页内容（不超过300字）:\n\n${pageContent}`
+              content: `请总结以下网页内容，并按照以下格式输出：
+
+Abstract (摘要)
+简洁概括内容的主要观点和结论（不超过200字）。请使用段落格式，保持适当的换行以提高可读性。
+
+Key Points (关键点)
+以无序列表形式列出内容中的关键信息点（5-7个要点），每个要点前使用 Markdown 的 "-" 符号：
+- 第一个要点
+- 第二个要点
+（示例格式）
+
+Related Questions (相关问题)
+列出3个与内容相关的问题，这些问题应该是读者可能感兴趣的延伸话题，同样使用 Markdown 的 "-" 符号：
+- 第一个问题？
+- 第二个问题？
+（示例格式）
+
+请确保格式严格按照上述三个部分输出，每个部分都要有明确的标题。相关问题部分的问题应该是完整的问句，便于用户点击后直接提问。
+
+网页内容：
+${pageContent}`
             }
           ];
           
@@ -143,6 +166,9 @@ export default defineBackground(() => {
           switch (model) {
             case "DeepSeek":
               response = await callDeepSeekAPI(apiKey, messages);
+              break;
+            case "Tongyi":
+              response = await callTongyiAPI(apiKey, messages);
               break;
             // Add cases for other models as needed
             default:
@@ -202,6 +228,51 @@ async function callDeepSeekAPI(apiKey: string, messages: ChatMessage[]): Promise
     return await response.json();
   } catch (error) {
     console.error("DeepSeek API error:", error);
+    throw error;
+  }
+}
+
+async function callTongyiAPI(apiKey: string, messages: ChatMessage[]): Promise<any> {
+  try {
+    const response = await fetch("https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "qwen-turbo", // Using Qwen-Max model
+        input: {
+          messages: messages.map(msg => ({
+            role: msg.role,
+            content: msg.content
+          }))
+        },
+        parameters: {
+          temperature: 0.7,
+          max_tokens: 2000,
+        }
+      }),
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.error?.message || `Tongyi API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    
+    // Transform the response to match the expected format
+    return {
+      choices: [{
+        message: {
+          role: 'assistant',
+          content: data.output?.text || ''
+        }
+      }]
+    };
+  } catch (error) {
+    console.error("Tongyi API error:", error);
     throw error;
   }
 }
